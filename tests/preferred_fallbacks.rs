@@ -1,4 +1,22 @@
-use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping};
+use cosmic_text::{Attrs, Buffer, Fallback, Family, FontSystem, Metrics, Shaping};
+use unicode_script::Script;
+
+#[derive(Debug)]
+struct TestFallback;
+
+impl Fallback for TestFallback {
+    fn common_fallback(&self) -> &[&'static str] {
+        &[]
+    }
+
+    fn forbidden_fallback(&self) -> &[&'static str] {
+        &["Noto Sans Hebrew", "Noto Sans Arabic"]
+    }
+
+    fn script_fallback(&self, _script: Script, _locale: &str) -> &[&'static str] {
+        &[]
+    }
+}
 
 #[derive(Clone, Copy)]
 enum TextKind {
@@ -75,5 +93,5 @@ fn test_font_system() -> FontSystem {
     db.set_sans_serif_family("Inter");
     db.set_monospace_family("Fira Mono");
 
-    FontSystem::new_with_locale_and_db("en-US".into(), db)
+    FontSystem::new_with_locale_and_db_and_fallback("en-US".into(), db, TestFallback)
 }

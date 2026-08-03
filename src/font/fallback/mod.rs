@@ -186,6 +186,7 @@ pub struct FontFallbackIter<'a> {
     font_system: &'a mut FontSystem,
     font_match_keys: &'a [FontMatchKey],
     default_families: Vec<FamilyOwned>,
+    preferred_start: usize,
     default_i: usize,
     scripts: &'a [Script],
     word: &'a str,
@@ -213,6 +214,7 @@ impl<'a> FontFallbackIter<'a> {
         } else {
             &font_system.proportional_fallbacks
         };
+        let preferred_start = default_families.len();
         let default_families = default_families
             .iter()
             .map(|family| FamilyOwned::new(**family))
@@ -227,6 +229,7 @@ impl<'a> FontFallbackIter<'a> {
             font_system,
             font_match_keys,
             default_families,
+            preferred_start,
             default_i: 0,
             scripts,
             word,
@@ -354,6 +357,9 @@ impl<'a> FontFallbackIter<'a> {
                         self.default_families[self.default_i - 1],
                         self.ideal_weight.0,
                     );
+                    if self.default_i > self.preferred_start {
+                        continue 'DEF_FAM;
+                    }
                     break 'DEF_FAM;
                 }
                 (false, Some(m_key)) => {
