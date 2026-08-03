@@ -8,7 +8,7 @@ use core::{mem, ops::Range};
 use fontdb::Family;
 use unicode_script::Script;
 
-use crate::{BuildHasher, Font, FontMatchKey, FontSystem, HashMap, ShapeBuffer};
+use crate::{BuildHasher, FamilyOwned, Font, FontMatchKey, FontSystem, HashMap, ShapeBuffer};
 
 #[cfg(not(any(all(unix, not(target_os = "android")), target_os = "windows")))]
 #[path = "other.rs"]
@@ -185,7 +185,7 @@ pub struct MonospaceFallbackInfo {
 pub struct FontFallbackIter<'a> {
     font_system: &'a mut FontSystem,
     font_match_keys: &'a [FontMatchKey],
-    default_families: &'a [&'a Family<'a>],
+    default_families: Vec<FamilyOwned>,
     default_i: usize,
     scripts: &'a [Script],
     word: &'a str,
@@ -205,6 +205,20 @@ impl<'a> FontFallbackIter<'a> {
         word: &'a str,
         ideal_weight: fontdb::Weight,
     ) -> Self {
+        let monospace = default_families
+            .first()
+            .is_some_and(|family| **family == Family::Monospace);
+        let preferred_families = if monospace {
+            &font_system.monospace_fallbacks
+        } else {
+            &font_system.proportional_fallbacks
+        };
+        let default_families = default_families
+            .iter()
+            .map(|family| FamilyOwned::new(**family))
+            .chain(preferred_families.iter().cloned())
+            .collect();
+
         font_system
             .fallbacks
             .extend(font_system.dyn_fallback.as_ref(), scripts);
@@ -277,8 +291,8 @@ impl<'a> FontFallbackIter<'a> {
     }
 
     fn default_font_match_key(&self) -> Option<&FontMatchKey> {
-        let default_family = self.default_families[self.default_i - 1];
-        let default_family_name = self.font_system.db().family_name(default_family);
+        let default_family = self.default_families[self.default_i - 1].as_family();
+        let default_family_name = self.font_system.db().family_name(&default_family);
 
         self.font_match_keys
             .iter()
@@ -287,12 +301,14 @@ impl<'a> FontFallbackIter<'a> {
     }
 
     fn next_item(&mut self, fallbacks: &Fallbacks) -> Option<<Self as Iterator>::Item> {
-        if let Some(fallback_info) = self.font_system.monospace_fallbacks_buffer.pop_first() {
-            if let Some(font) = self
-                .font_system
-                .get_font(fallback_info.id, self.ideal_weight)
-            {
-                return Some(font);
+        if self.default_i == self.default_families.len() {
+            if let Some(fallback_info) = self.font_system.monospace_fallbacks_buffer.pop_first() {
+                if let Some(font) = self
+                    .font_system
+                    .get_font(fallback_info.id, self.ideal_weight)
+                {
+                    return Some(font);
+                }
             }
         }
 
@@ -304,7 +320,8 @@ impl<'a> FontFallbackIter<'a> {
 
         'DEF_FAM: while self.default_i < self.default_families.len() {
             self.default_i += 1;
-            let is_mono = self.default_families[self.default_i - 1] == &Family::Monospace;
+            let is_mono =
+                self.default_families[self.default_i - 1].as_family() == Family::Monospace;
             let default_font_match_key = self.default_font_match_key().copied();
             let word_chars_count = self.word.chars().count();
 
@@ -413,12 +430,15 @@ impl<'a> FontFallbackIter<'a> {
                 }
             }
             // If default family is Monospace fallback to first monospaced font
-            if let Some(fallback_info) = self.font_system.monospace_fallbacks_buffer.pop_first() {
-                if let Some(font) = self
-                    .font_system
-                    .get_font(fallback_info.id, self.ideal_weight)
+            if self.default_i == self.default_families.len() {
+                if let Some(fallback_info) = self.font_system.monospace_fallbacks_buffer.pop_first()
                 {
-                    return Some(font);
+                    if let Some(font) = self
+                        .font_system
+                        .get_font(fallback_info.id, self.ideal_weight)
+                    {
+                        return Some(font);
+                    }
                 }
             }
         }

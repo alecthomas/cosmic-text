@@ -1,4 +1,4 @@
-use crate::{Attrs, Font, FontMatchAttrs, HashMap, ShapeBuffer};
+use crate::{Attrs, Family, FamilyOwned, Font, FontMatchAttrs, HashMap, ShapeBuffer};
 use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use alloc::string::String;
@@ -168,6 +168,12 @@ pub struct FontSystem {
 
     /// List of fallbacks
     pub(crate) fallbacks: Fallbacks,
+
+    /// Preferred fallbacks for proportional text.
+    pub(crate) proportional_fallbacks: Vec<FamilyOwned>,
+
+    /// Preferred fallbacks for monospaced text.
+    pub(crate) monospace_fallbacks: Vec<FamilyOwned>,
 }
 
 impl fmt::Debug for FontSystem {
@@ -347,6 +353,8 @@ impl FontSystem {
             shape_buffer: ShapeBuffer::default(),
             dyn_fallback: Box::new(impl_fallback),
             fallbacks,
+            proportional_fallbacks: Vec::new(),
+            monospace_fallbacks: Vec::new(),
         }
     }
 
@@ -369,6 +377,24 @@ impl FontSystem {
     pub fn db_mut(&mut self) -> &mut fontdb::Database {
         self.font_matches_cache.clear();
         &mut self.db
+    }
+
+    /// Sets preferred fallback families for proportional text.
+    ///
+    /// These families are tried in order before the platform fallbacks.
+    pub fn set_proportional_fallbacks<'a>(
+        &mut self,
+        families: impl IntoIterator<Item = Family<'a>>,
+    ) {
+        self.proportional_fallbacks = families.into_iter().map(FamilyOwned::new).collect();
+    }
+
+    /// Sets preferred fallback families for monospaced text.
+    ///
+    /// These families are tried in order before automatic monospaced and
+    /// platform fallbacks.
+    pub fn set_monospace_fallbacks<'a>(&mut self, families: impl IntoIterator<Item = Family<'a>>) {
+        self.monospace_fallbacks = families.into_iter().map(FamilyOwned::new).collect();
     }
 
     /// Consume this [`FontSystem`] and return the locale and database.
