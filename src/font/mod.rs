@@ -57,6 +57,7 @@ pub struct Font {
     data: FontData,
     id: fontdb::ID,
     monospace_fallback: Option<FontMonospaceFallback>,
+    optical_size: Option<f32>,
     pub(crate) italic_or_oblique: bool,
 }
 
@@ -105,6 +106,12 @@ impl Font {
         &self.harfrust.borrow_owner().metrics
     }
 
+    /// The `opsz` coordinate this instance was shaped at. Rasterization must
+    /// reuse it: `opsz` varies advances, so outlines cut at another size drift.
+    pub fn optical_size(&self) -> Option<f32> {
+        self.optical_size
+    }
+
     #[cfg(feature = "peniko")]
     pub fn as_peniko(&self) -> PenikoFont {
         self.data.clone()
@@ -141,9 +148,17 @@ impl Font {
         // `ShaperData`, and once to create the persistent `FontRef` tied to the
         // lifetime of the face data.
         let font_ref = FontRef::from_index((*data).as_ref(), info.index).ok()?;
-        let location = font_ref
+        // Shaping is size-independent, so one optical size must serve them all.
+        // Pick the axis minimum: small text is where the wrong cut shows most.
+        let optical_size = font_ref
             .axes()
-            .location([(Tag::new(b"wght"), weight.0 as f32)]);
+            .get_by_tag(Tag::new(b"opsz"))
+            .map(|axis| axis.min_value());
+        let location = font_ref.axes().location(
+            [(Tag::new(b"wght"), weight.0 as f32)]
+                .into_iter()
+                .chain(optical_size.map(|value| (Tag::new(b"opsz"), value))),
+        );
         let metrics = font_ref.metrics(Size::unscaled(), &location);
 
         let monospace_fallback = if cfg!(feature = "monospace_fallback") {
@@ -210,6 +225,7 @@ impl Font {
         Some(Self {
             id: info.id,
             monospace_fallback,
+            optical_size,
             #[cfg(feature = "swash")]
             swash: {
                 let swash = swash::FontRef::from_index((*data).as_ref(), info.index as usize)?;
@@ -260,5 +276,25 @@ mod test {
 
         #[cfg(not(target_arch = "wasm32"))]
         println!("Fonts load time {}ms.", now.elapsed().as_millis());
+    }
+
+    #[test]
+    fn test_variable_face_shapes_at_smallest_optical_size() {
+        use super::{Font, Tag};
+
+        let Ok(data) = std::fs::read("/System/Library/Fonts/SFNS.ttf") else {
+            return;
+        };
+        let mut db = fontdb::Database::new();
+        let id = db.load_font_source(fontdb::Source::Binary(alloc::sync::Arc::new(data)))[0];
+
+        let font = Font::new(&db, id, fontdb::Weight::BOLD).expect("system font loads");
+        let font_ref = skrifa::FontRef::from_index(font.data(), 0).expect("system font parses");
+        let axis = skrifa::MetadataProvider::axes(&font_ref)
+            .get_by_tag(Tag::new(b"opsz"))
+            .expect("system font has an optical size axis");
+
+        assert_eq!(Some(axis.min_value()), font.optical_size());
+        assert_ne!(Some(axis.default_value()), font.optical_size());
     }
 }
