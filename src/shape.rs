@@ -2832,6 +2832,7 @@ impl ShapeLine {
             if hinting == Hinting::Enabled {
                 x = x.round();
             }
+            let line_start = x;
 
             // TODO: Only certain `is_whitespace` chars are typically expanded but this is what is
             // currently used to compute `visual_line.spaces`.
@@ -2930,9 +2931,11 @@ impl ShapeLine {
                                     0.0
                                 },
                             );
-                            if let Some(match_em_width) = match_mono_em_width {
-                                // Round to nearest monospace width
-                                x_advance = ((x_advance / match_em_width).round()) * match_em_width;
+                            if let Some(match_width) = match_mono_width {
+                                // A visible glyph never collapses onto its neighbour's cell.
+                                let cells = (x_advance / match_width).round();
+                                let cells = if x_advance > 0.0 { cells.max(1.0) } else { cells };
+                                x_advance = cells * match_width;
                             }
                             if hinting == Hinting::Enabled {
                                 x_advance = x_advance.round();
@@ -3050,7 +3053,10 @@ impl ShapeLine {
             }
 
             layout_lines.push(LayoutLine {
-                w: if align != Align::Justified {
+                // Monospace snapping moves glyphs off the shaped widths.
+                w: if match_mono_width.is_some() {
+                    (x - line_start).abs()
+                } else if align != Align::Justified {
                     visual_line.w
                 } else if self.rtl {
                     start_x - x
