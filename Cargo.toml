@@ -46,7 +46,14 @@ features = ["hardcoded-data"]
 default = ["std", "swash", "fontconfig"]
 fontconfig = ["fontdb/fontconfig", "std"]
 monospace_fallback = []
-no_std = ["hashbrown", "dep:libm", "skrifa/libm", "core_maths", "swash?/libm", "harfrust/libm"]
+no_std = [
+    "hashbrown",
+    "dep:libm",
+    "core_maths",
+    "harfrust/libm",
+    "skrifa/libm",
+    "swash?/libm",
+]
 peniko = []
 shape-run-cache = []
 std = [
@@ -73,6 +80,10 @@ harness = false
 
 [[bench]]
 name = "decoration_toggle"
+harness = false
+
+[[bench]]
+name = "monospace_shaping"
 harness = false
 
 [workspace]
