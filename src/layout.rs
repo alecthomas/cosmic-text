@@ -4,7 +4,7 @@ use core::fmt::Display;
 
 use core::ops::Range;
 
-use crate::{math, CacheKey, CacheKeyFlags, Color, GlyphDecorationData};
+use crate::{math, CacheKey, CacheKeyFlags, Color, GlyphDecorationData, LayoutRun};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
@@ -34,6 +34,14 @@ pub struct LayoutGlyph {
     pub y: f32,
     /// Width of hitbox
     pub w: f32,
+    /// Ascender of the glyph in pixels
+    ///
+    /// This is the distance from the baseline to the top of the glyph
+    pub ascender: f32,
+    /// Descender of the glyph in pixels
+    ///
+    /// This is the distance from the baseline to the bottom of the glyph
+    pub descender: f32,
     /// Unicode `BiDi` embedding level, character is left-to-right if `level` is divisible by 2
     pub level: unicode_bidi::Level,
     /// X offset in line
@@ -75,6 +83,28 @@ pub struct DecorationSpan {
     pub font_size: f32,
 }
 
+impl DecorationSpan {
+    /// The horizontal extent of this span's glyphs within `run`, which must
+    /// be the layout run containing the span. Empty if the span covers no
+    /// glyphs.
+    pub fn x_range(&self, run: &LayoutRun) -> Range<f32> {
+        // Compute the extent as min/max over all glyphs, not first/last,
+        // because RTL paragraphs store glyphs in right-to-left order.
+        let mut x_min = f32::INFINITY;
+        let mut x_max = f32::NEG_INFINITY;
+        for glyph in &run.glyphs[self.glyph_range.clone()] {
+            x_min = x_min.min(glyph.x);
+            x_max = x_max.max(glyph.x + glyph.w);
+        }
+
+        if x_max > x_min {
+            x_min..x_max
+        } else {
+            0.0..0.0
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PhysicalGlyph {
     /// Cache key, see [`CacheKey`]
@@ -95,8 +125,8 @@ impl LayoutGlyph {
             self.glyph_id,
             self.font_size * scale,
             (
-                (self.x + x_offset).mul_add(scale, offset.0),
-                math::truncf((self.y - y_offset).mul_add(scale, offset.1)), // Hinting in Y axis
+                (self.x + x_offset) * scale + offset.0,
+                math::truncf((self.y - y_offset) * scale + offset.1), // Hinting in Y axis
             ),
             self.font_weight,
             self.cache_key_flags,

@@ -5,8 +5,8 @@
 use crate::fallback::FontFallbackIter;
 use crate::{
     math, Align, Attrs, AttrsList, CacheKeyFlags, Color, DecorationMetrics, DecorationSpan,
-    Ellipsize, EllipsizeHeightLimit, Family, Font, FontSystem, GlyphDecorationData, Hinting,
-    LayoutGlyph, LayoutLine, Metrics, Wrap,
+    Ellipsize, EllipsizeHeightLimit, Family, Font, FontSystem, GlyphDecorationData, HashSet,
+    Hinting, LayoutGlyph, LayoutLine, Metrics, Wrap,
 };
 #[cfg(not(feature = "std"))]
 use alloc::{format, vec, vec::Vec};
@@ -126,6 +126,14 @@ pub struct ShapeBuffer {
     /// Buffer for shape words.
     words: Vec<ShapeWord>,
 
+    /// Decoration data for the shape spans of the line currently being laid
+    /// out, stored flat. `span_decoration_offsets` holds the per-span
+    /// boundaries into this buffer. Cleared and refilled on every layout.
+    span_decoration_data: Vec<(Range<usize>, GlyphDecorationData)>,
+
+    /// For each shape span, the range of its entries in `span_decoration_data`.
+    span_decoration_offsets: Vec<Range<usize>>,
+
     /// Buffers for visual lines.
     visual_lines: Vec<VisualLine>,
     cached_visual_lines: Vec<VisualLine>,
@@ -149,7 +157,7 @@ fn shape_fallback(
     start_run: usize,
     end_run: usize,
     span_rtl: bool,
-) -> Vec<usize> {
+) -> HashSet<usize> {
     let run = &line[start_run..end_run];
 
     let font_scale = font.metrics().units_per_em as f32;
@@ -180,7 +188,7 @@ fn shape_fallback(
     let mut rb_font_features = Vec::new();
 
     // Convert attrs::Feature to harfrust::Feature
-    for feature in &attrs.font_features.features {
+    for feature in attrs.font_features.iter() {
         rb_font_features.push(harfrust::Feature::new(
             harfrust::Tag::new(feature.tag.as_bytes()),
             feature.value,
@@ -220,20 +228,23 @@ fn shape_fallback(
         }
     };
 
-    let glyph_buffer = font
-        .shaper()
-        .shape_with_plan(shape_plan, buffer, &rb_font_features);
+    let glyph_buffer = font.shaper().shape(
+        buffer,
+        harfrust::ShapeOptions::new()
+            .plan(Some(shape_plan))
+            .features(&rb_font_features),
+    );
     let glyph_infos = glyph_buffer.glyph_infos();
     let glyph_positions = glyph_buffer.glyph_positions();
 
-    let mut missing = Vec::new();
+    let mut missing = HashSet::default();
     glyphs.reserve(glyph_infos.len());
     let glyph_start = glyphs.len();
     for (info, pos) in glyph_infos.iter().zip(glyph_positions.iter()) {
         let start_glyph = start_run + info.cluster as usize;
 
         if info.glyph_id == 0 {
-            missing.push(start_glyph);
+            missing.insert(start_glyph);
         }
 
         let attrs = attrs_list.get_span(start_glyph);
@@ -370,57 +381,35 @@ fn shape_run(
             span_rtl,
         );
 
-        // Insert all matching glyphs
-        let mut fb_i = 0;
-        while fb_i < fb_glyphs.len() {
-            let start = fb_glyphs[fb_i].start;
-            let end = fb_glyphs[fb_i].end;
+        // Keep clusters that were missing, and not missing in the fallback font
+        fb_glyphs
+            .retain(|glyph| missing.contains(&glyph.start) && !fb_missing.contains(&glyph.start));
 
-            // Skip clusters that are not missing, or where the fallback font is missing
-            if !missing.contains(&start) || fb_missing.contains(&start) {
-                fb_i += 1;
-                continue;
-            }
+        // Update missing
+        let mut added = HashSet::default();
+        for fb_glyph in &fb_glyphs {
+            let start = fb_glyph.start;
+            let end = fb_glyph.end;
 
-            let mut missing_i = 0;
-            while missing_i < missing.len() {
-                if missing[missing_i] >= start && missing[missing_i] < end {
-                    // println!("No longer missing {}", missing[missing_i]);
-                    missing.remove(missing_i);
-                } else {
-                    missing_i += 1;
-                }
+            for i in start..end {
+                missing.remove(&i);
+                added.insert(i);
             }
+        }
 
-            // Find prior glyphs
-            let mut i = glyph_start;
-            while i < glyphs.len() {
-                if glyphs[i].start >= start && glyphs[i].end <= end {
-                    break;
-                }
-                i += 1;
-            }
+        if added.is_empty() {
+            continue;
+        }
 
-            // Remove prior glyphs
-            while i < glyphs.len() {
-                if glyphs[i].start >= start && glyphs[i].end <= end {
-                    let _glyph = glyphs.remove(i);
-                    // log::trace!("Removed {},{} from {}", _glyph.start, _glyph.end, i);
-                } else {
-                    break;
-                }
-            }
+        // Remove prior glyphs
+        glyphs.retain(|glyph| !added.contains(&glyph.start));
 
-            while fb_i < fb_glyphs.len() {
-                if fb_glyphs[fb_i].start >= start && fb_glyphs[fb_i].end <= end {
-                    let fb_glyph = fb_glyphs.remove(fb_i);
-                    // log::trace!("Insert {},{} from font {} at {}", fb_glyph.start, fb_glyph.end, font_i, i);
-                    glyphs.insert(i, fb_glyph);
-                    i += 1;
-                } else {
-                    break;
-                }
-            }
+        // Sort the new glyphs in to maintain monotonicity.
+        glyphs.extend(fb_glyphs);
+        if span_rtl {
+            (&mut glyphs[glyph_start..]).sort_by(|a, b| b.start.cmp(&a.start));
+        } else {
+            (&mut glyphs[glyph_start..]).sort_by(|a, b| a.start.cmp(&b.start));
         }
     }
 
@@ -691,6 +680,8 @@ impl ShapeGlyph {
             x,
             y,
             w,
+            ascender: font_size * self.ascent,
+            descender: font_size * self.descent,
             level,
             x_offset: self.x_offset,
             y_offset: self.y_offset,
@@ -847,11 +838,16 @@ impl ShapeWord {
 
         if is_simple_ascii && !word.is_empty() && {
             let attrs_start = attrs_list.get_span(word_range.start);
+            // The fast path shapes the whole word with `attrs_start`. Besides
+            // the explicit spans, an uncovered gap falls back to the defaults,
+            // so reject the fast path when those differ (e.g. a styled prefix
+            // with a default tail, otherwise shaped with the prefix's font).
             attrs_list.spans_iter().all(|(other_range, other_attrs)| {
                 word_range.end <= other_range.start
                     || other_range.end <= word_range.start
                     || attrs_start.compatible(&other_attrs.as_attrs())
-            })
+            }) && (attrs_list.spans.gaps(&word_range).next().is_none()
+                || attrs_start.compatible(&attrs_list.defaults()))
         } {
             shaping.run(
                 &mut glyphs,
@@ -916,10 +912,7 @@ impl ShapeWord {
 pub struct ShapeSpan {
     pub level: unicode_bidi::Level,
     pub words: Vec<ShapeWord>,
-    /// Decoration data per user-level attr span within this shape span.
-    /// Each entry maps a byte range to its decoration config and font metrics.
-    /// Empty when no decorations are active.
-    pub decoration_spans: Vec<(Range<usize>, GlyphDecorationData)>,
+    pub byte_range: Range<usize>,
 }
 
 impl ShapeSpan {
@@ -930,7 +923,7 @@ impl ShapeSpan {
         Self {
             level: unicode_bidi::Level::ltr(),
             words: Vec::default(),
-            decoration_spans: Vec::new(),
+            byte_range: 0..0,
         }
     }
 
@@ -1118,11 +1111,23 @@ impl ShapeSpan {
 
         self.level = level;
         self.words = words;
+        self.byte_range = span_range;
 
-        // Build decoration spans: one entry per user-level attr span that has
-        // decorations within this shape span's byte range.  Font metrics come from
-        // the primary font (first shaped glyph), following Pango convention.
-        self.decoration_spans.clear();
+        // Cache buffer for future reuse.
+        font_system.shape_buffer.words = cached_words;
+    }
+
+    /// The decoration spans for this shape span, resolved from the current
+    /// attrs. They are appended to the reusable scratch buffer in
+    /// `font_system` and the range of the appended entries is returned.
+    /// Font metrics come from the primary font (first shaped glyph),
+    /// following Pango convention.
+    pub(crate) fn decorations_into(
+        &self,
+        attrs_list: &AttrsList,
+        font_system: &mut FontSystem,
+    ) -> Range<usize> {
+        let span_range = self.byte_range.clone();
 
         // Early-out: skip font lookup and span iteration when no decorations exist.
         // For plain text (the common case) this is a single bool check.
@@ -1132,69 +1137,44 @@ impl ShapeSpan {
                 let end = range.end.min(span_range.end);
                 start < end && attr_owned.as_attrs().text_decoration.has_decoration()
             });
+        if !any_decoration {
+            let len = font_system.shape_buffer.span_decoration_data.len();
+            return len..len;
+        }
 
-        if any_decoration {
-            // Get font metrics once from the primary glyph of this shape span
-            let primary_metrics = self
-                .words
-                .iter()
-                .flat_map(|w| w.glyphs.first())
-                .next()
-                .and_then(|glyph| {
-                    font_system
-                        .get_font(glyph.font_id, glyph.font_weight)
-                        .map(|font| decoration_metrics(&font))
-                });
+        // Get font metrics once from the primary glyph of this shape span
+        let primary_metrics = self
+            .words
+            .iter()
+            .flat_map(|w| w.glyphs.first())
+            .next()
+            .and_then(|glyph| {
+                font_system
+                    .get_font(glyph.font_id, glyph.font_weight)
+                    .map(|font| decoration_metrics(&font))
+            });
 
-            if let Some((ul_metrics, st_metrics, ascent)) = primary_metrics {
-                // Track which sub-ranges of span_range are covered by explicit spans
-                let mut covered_end = span_range.start;
+        let out = &mut font_system.shape_buffer.span_decoration_data;
+        let start = out.len();
 
-                for (range, attr_owned) in attrs_list.spans_iter() {
-                    // Compute intersection with our shape span's byte range
-                    let start = range.start.max(span_range.start);
-                    let end = range.end.min(span_range.end);
-                    if start >= end {
-                        continue;
-                    }
+        if let Some((ul_metrics, st_metrics, ascent)) = primary_metrics {
+            // Track which sub-ranges of span_range are covered by explicit spans
+            let mut covered_end = span_range.start;
 
-                    // Check the gap before this span (covered by defaults)
-                    if covered_end < start {
-                        let default_attrs = attrs_list.defaults();
-                        if default_attrs.text_decoration.has_decoration() {
-                            self.decoration_spans.push((
-                                covered_end..start,
-                                GlyphDecorationData {
-                                    text_decoration: default_attrs.text_decoration,
-                                    underline_metrics: ul_metrics,
-                                    strikethrough_metrics: st_metrics,
-                                    ascent,
-                                },
-                            ));
-                        }
-                    }
-                    covered_end = end;
-
-                    let attrs = attr_owned.as_attrs();
-                    if attrs.text_decoration.has_decoration() {
-                        self.decoration_spans.push((
-                            start..end,
-                            GlyphDecorationData {
-                                text_decoration: attrs.text_decoration,
-                                underline_metrics: ul_metrics,
-                                strikethrough_metrics: st_metrics,
-                                ascent,
-                            },
-                        ));
-                    }
+            for (range, attr_owned) in attrs_list.spans_iter() {
+                // Compute intersection with our shape span's byte range
+                let start = range.start.max(span_range.start);
+                let end = range.end.min(span_range.end);
+                if start >= end {
+                    continue;
                 }
 
-                // Check trailing gap (covered by defaults)
-                if covered_end < span_range.end {
+                // Check the gap before this span (covered by defaults)
+                if covered_end < start {
                     let default_attrs = attrs_list.defaults();
                     if default_attrs.text_decoration.has_decoration() {
-                        self.decoration_spans.push((
-                            covered_end..span_range.end,
+                        out.push((
+                            covered_end..start,
                             GlyphDecorationData {
                                 text_decoration: default_attrs.text_decoration,
                                 underline_metrics: ul_metrics,
@@ -1204,11 +1184,40 @@ impl ShapeSpan {
                         ));
                     }
                 }
+                covered_end = end;
+
+                let attrs = attr_owned.as_attrs();
+                if attrs.text_decoration.has_decoration() {
+                    out.push((
+                        start..end,
+                        GlyphDecorationData {
+                            text_decoration: attrs.text_decoration,
+                            underline_metrics: ul_metrics,
+                            strikethrough_metrics: st_metrics,
+                            ascent,
+                        },
+                    ));
+                }
+            }
+
+            // Check trailing gap (covered by defaults)
+            if covered_end < span_range.end {
+                let default_attrs = attrs_list.defaults();
+                if default_attrs.text_decoration.has_decoration() {
+                    out.push((
+                        covered_end..span_range.end,
+                        GlyphDecorationData {
+                            text_decoration: default_attrs.text_decoration,
+                            underline_metrics: ul_metrics,
+                            strikethrough_metrics: st_metrics,
+                            ascent,
+                        },
+                    ));
+                }
             }
         }
 
-        // Cache buffer for future reuse.
-        font_system.shape_buffer.words = cached_words;
+        start..out.len()
     }
 }
 
@@ -1468,7 +1477,7 @@ impl ShapeLine {
             ShapeSpan {
                 level,
                 words: vec![word],
-                decoration_spans: Vec::new(),
+                byte_range: 0..0,
             }
         });
 
@@ -2301,6 +2310,25 @@ impl ShapeLine {
         }
     }
 
+    /// Resolve the decoration spans of all shape spans into the reusable
+    /// scratch buffer of `font_system`, ready to be consumed by
+    /// `layout_to_buffer`.
+    pub(crate) fn fill_span_decorations(
+        &self,
+        attrs_list: &AttrsList,
+        font_system: &mut FontSystem,
+    ) {
+        font_system.shape_buffer.span_decoration_data.clear();
+        font_system.shape_buffer.span_decoration_offsets.clear();
+        for span in &self.spans {
+            let span_range = span.decorations_into(attrs_list, font_system);
+            font_system
+                .shape_buffer
+                .span_decoration_offsets
+                .push(span_range);
+        }
+    }
+
     pub fn layout_to_buffer(
         &self,
         scratch: &mut ShapeBuffer,
@@ -2743,11 +2771,7 @@ impl ShapeLine {
                                         font_size,
                                         Some(SpanWordGlyphPos::with_wordglyph(
                                             span_index,
-                                            if i > 0 && span.words[i - 1].blank {
-                                                WordGlyphPos::new(i - 1, 0)
-                                            } else {
-                                                WordGlyphPos::new(i, 0)
-                                            },
+                                            WordGlyphPos::new(i, 0),
                                         )),
                                         width_opt,
                                         ellipsize,
@@ -2880,7 +2904,12 @@ impl ShapeLine {
                     let deco_spans: &[(Range<usize>, GlyphDecorationData)] = if is_ellipsis {
                         &[]
                     } else {
-                        &self.spans[r.span].decoration_spans
+                        scratch
+                            .span_decoration_offsets
+                            .get(r.span)
+                            .map_or(&[][..], |range| {
+                                &scratch.span_decoration_data[range.start..range.end]
+                            })
                     };
                     // Cursor into deco_spans — advances forward as glyphs are
                     // emitted in byte order, giving amortized O(1) lookup.
@@ -2923,14 +2952,12 @@ impl ShapeLine {
                                 _ => font_size,
                             };
 
-                            let mut x_advance = glyph_font_size.mul_add(
-                                glyph.x_advance,
-                                if word.blank {
+                            let mut x_advance = glyph_font_size * glyph.x_advance
+                                + if word.blank {
                                     justification_expansion
                                 } else {
                                     0.0
-                                },
-                            );
+                                };
                             if let Some(match_width) = match_mono_width {
                                 // A visible glyph never collapses onto its neighbour's cell.
                                 let cells = (x_advance / match_width).round();
@@ -2988,9 +3015,12 @@ impl ShapeLine {
                                 .get(deco_cursor)
                                 .filter(|(range, _)| glyph.start >= range.start);
                             let glyph_idx = glyphs.len() - 1;
+                            // Only extend a span that ends at this glyph, so
+                            // two equally decorated ranges with undecorated
+                            // glyphs between them stay separate spans.
                             let extends = matches!(
                                 (decorations.last(), &glyph_deco),
-                                (Some(span), Some((_, d))) if span.data == *d
+                                (Some(span), Some((_, d))) if span.data == *d && span.glyph_range.end == glyph_idx
                             );
                             if extends {
                                 if let Some(last) = decorations.last_mut() {

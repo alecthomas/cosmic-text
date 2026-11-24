@@ -126,7 +126,7 @@ impl From<CacheMetrics> for Metrics {
     }
 }
 /// A 4-byte `OpenType` feature tag identifier
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct FeatureTag([u8; 4]);
 
 impl FeatureTag {
@@ -166,7 +166,7 @@ pub struct Feature {
 
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct FontFeatures {
-    pub features: Vec<Feature>,
+    features: Vec<Feature>,
 }
 
 impl FontFeatures {
@@ -176,8 +176,21 @@ impl FontFeatures {
         }
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = &Feature> {
+        self.features.iter()
+    }
+
+    /// Set a feature value by [`FeatureTag`].
+    ///
+    /// This ensures that the features are sorted by [`FeatureTag`] without duplicate tags.
     pub fn set(&mut self, tag: FeatureTag, value: u32) -> &mut Self {
-        self.features.push(Feature { tag, value });
+        match self
+            .features
+            .binary_search_by_key(&tag, |feature| feature.tag)
+        {
+            Ok(index) => self.features[index].value = value,
+            Err(index) => self.features.insert(index, Feature { tag, value }),
+        }
         self
     }
 
@@ -415,6 +428,7 @@ impl<'a> Attrs<'a> {
             && self.stretch == other.stretch
             && self.style == other.style
             && self.weight == other.weight
+            && self.font_features == other.font_features
     }
 }
 
@@ -457,6 +471,21 @@ pub struct AttrsOwned {
 }
 
 impl AttrsOwned {
+    /// Equal in every attribute that affects shaping, ignoring
+    /// `text_decoration`, which is resolved at layout.
+    pub fn eq_shape_attrs(&self, other: &Self) -> bool {
+        self.color_opt == other.color_opt
+            && self.family_owned == other.family_owned
+            && self.stretch == other.stretch
+            && self.style == other.style
+            && self.weight == other.weight
+            && self.metadata == other.metadata
+            && self.cache_key_flags == other.cache_key_flags
+            && self.metrics_opt == other.metrics_opt
+            && self.letter_spacing_opt == other.letter_spacing_opt
+            && self.font_features == other.font_features
+    }
+
     pub fn new(attrs: &Attrs) -> Self {
         Self {
             color_opt: attrs.color_opt,
@@ -510,6 +539,27 @@ impl AttrsList {
     /// Get the default [Attrs]
     pub fn defaults(&self) -> Attrs<'_> {
         self.defaults.as_attrs()
+    }
+
+    /// True if the two lists differ only in `text_decoration`. Spans that carry
+    /// only decoration (otherwise equal to the defaults) are ignored.
+    pub fn eq_shape_attrs(&self, other: &Self) -> bool {
+        if !self.defaults.eq_shape_attrs(&other.defaults) {
+            return false;
+        }
+        let mut a = self
+            .spans_iter()
+            .filter(|(_, attrs)| !attrs.eq_shape_attrs(&self.defaults));
+        let mut b = other
+            .spans_iter()
+            .filter(|(_, attrs)| !attrs.eq_shape_attrs(&other.defaults));
+        loop {
+            match (a.next(), b.next()) {
+                (None, None) => return true,
+                (Some((ra, aa)), Some((rb, ab))) if ra == rb && aa.eq_shape_attrs(ab) => {}
+                _ => return false,
+            }
+        }
     }
 
     /// Get the current attribute spans
