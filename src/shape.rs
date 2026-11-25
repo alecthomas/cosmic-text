@@ -3296,7 +3296,11 @@ impl ShapeLine {
                             if let Some(match_width) = match_mono_width {
                                 // A visible glyph never collapses onto its neighbour's cell.
                                 let cells = (x_advance / match_width).round();
-                                let cells = if x_advance > 0.0 { cells.max(1.0) } else { cells };
+                                let cells = if x_advance > 0.0 {
+                                    cells.max(1.0)
+                                } else {
+                                    cells
+                                };
                                 x_advance = cells * match_width;
                             }
                             if hinting == Hinting::Enabled {
